@@ -30,11 +30,6 @@ namespace SqlReportFileAction
             return queue.Count >= limitLength;
         }
 
-        public List<T> ToList()
-        {
-            return queue.ToList();
-        }
-
         public T Get(int position)
         {
             if (position >= 0 && position < queue.Count)

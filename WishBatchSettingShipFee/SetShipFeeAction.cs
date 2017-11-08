@@ -3,6 +3,7 @@ using System;
 using System.IO;
 using System.Net;
 using System.Text;
+using System.Linq;
 
 namespace WishBatchSettingShipFee
 {
@@ -28,8 +29,49 @@ namespace WishBatchSettingShipFee
             }
         }
 
-        public void Execute(ReportRow row)
+        static string TageInnerText(string xml, string tagName)
         {
+            string tagStart = "<" + tagName;
+            int idx = xml.IndexOf(tagStart);
+            if (idx == -1)
+            {
+                return null;
+            }
+            else
+            {
+                int idxTagEnd = xml.IndexOf(">", idx + tagStart.Length);
+                if (idxTagEnd == -1 || xml[idxTagEnd - 1] == '/')
+                {
+                    //"<Tag />"
+                    return string.Empty;
+                }
+                else
+                {
+                    int idxEndTag = xml.IndexOf("</" + tagName + ">", idxTagEnd);
+                    if (idxEndTag > idxTagEnd)
+                    {
+                        return xml.Substring(idxTagEnd + 1, idxEndTag - 1 - idxTagEnd);
+                    }
+                    else
+                    {
+                        return string.Empty;
+                    }
+                }
+            }
+        }
+
+        int retryTimes = 0; //重试次数，成功后至0
+        LimitQueue<string> errorCodeQue = new LimitQueue<string>(5);
+        string lastAccessToken = string.Empty;
+
+        public void Execute(ReportRow row, Action<string, object[]> log = null)
+        {
+            if (row["AccessToken"] == lastAccessToken && errorCodeQue.IsFull() && errorCodeQue.Distinct().Count() == 1)
+            {
+                //重复5次以上错误，略过处理
+                return;
+            }
+
             /*
             <?xml version="1.0" encoding="utf-8"?>
             <Response>
@@ -38,29 +80,42 @@ namespace WishBatchSettingShipFee
             <Data></Data>
             </Response>
              */
-            string apiFormat = "https://china-merchant.wish.com/api/v2/product/update-multi-shipping";
 
+            string apiFormat = "https://china-merchant.wish.com/api/v2/product/update-multi-shipping";
             string apiRequestUrl = string.Format("access_token={0}&format=xml&id={1}", row["AccessToken"], row["WishId"]);
             string responseText = string.Empty;
+            string responseCode = "0", errorFormat = "#WishId:{0}, Error:{1}";
+
+            string appendParam = AppendProductShipFeeParameters(Convert.ToDouble(row["SoldPrice"]), Convert.ToDouble(row["ShippingFee"]));
+            if (appendParam.Length > 3)
+            {
+                apiRequestUrl += appendParam;
+            }
+            else
+            {
+                return;
+            }
+
+         InvokeStart:
             try
             {
-                //string aprResult = NC.DownloadString(apiRequestUrl);
-                string appendParam = AppendProductShipFeeParameters(Convert.ToDouble(row["SoldPrice"]), Convert.ToDouble(row["ShippingFee"]));
-                if (appendParam.Length > 3)
+                //responseText = Encoding.UTF8.GetString(NC.UploadData(apiFormat, Encoding.UTF8.GetBytes(apiRequestUrl)));
+                responseText = GetCurrentResult()(apiFormat + "?" + apiRequestUrl);
+                responseCode = TageInnerText(responseText, "Code");
+                if (responseCode != "0")
                 {
-                    apiRequestUrl += appendParam;
+                    if (log != null)
+                    {
+                        log(errorFormat, new object[] { row["WishId"], responseText });
+                    }
+                    else
+                    {
+                        Console.WriteLine(string.Format(errorFormat, row["WishId"], responseText));
+                    }
                 }
                 else
                 {
-                    return;
-                }
-
-                //responseText = Encoding.UTF8.GetString(NC.UploadData(apiFormat, Encoding.UTF8.GetBytes(apiRequestUrl)));
-                responseText = GetCurrentResult()(apiFormat + "?" + apiRequestUrl);
-                if (responseText.IndexOf("<Code>0</Code>") == -1)
-                {
-                    Console.WriteLine(row["WishId"]);
-                    Console.WriteLine(responseText);
+                    retryTimes = 0;
                 }
             }
             catch (WebException wEx)
@@ -73,16 +128,50 @@ namespace WishBatchSettingShipFee
                         sr.Close();
                     }
                 }
+
+                responseText = string.IsNullOrEmpty(responseText) ? wEx.Message : responseText;
+                responseCode = TageInnerText(responseText, "Code");
+                if (string.IsNullOrEmpty(responseCode))
+                {
+                    //没有错误的Code
+                    retryTimes++;
+                    if (retryTimes < 3)
+                    {
+                        System.Threading.Thread.Sleep(1000 * 3);
+                        goto InvokeStart;
+                    }
+                }
                 else
                 {
-                    Console.WriteLine(wEx.Message);
+                    errorCodeQue.Enqueue(responseCode);
+                    string errMsg = TageInnerText(responseText, "Message");
+                    if (log != null)
+                    {
+                        log("URL:{0}, Error:{1}", new object[] { apiRequestUrl, errMsg });
+                    }
+                    else
+                    {
+                        Console.WriteLine(string.Format("URL:{0}, Error:{1}", apiRequestUrl, errMsg));
+                    }
                 }
             }
             catch (Exception ncEx)
             {
-                Console.WriteLine(apiRequestUrl);
-                Console.WriteLine(ncEx.Message);
-                System.Threading.Thread.Sleep(1000 * 60 * 1);
+                if (log != null)
+                {
+                    log("URL:{0}, Error:{1}", new object[] { apiRequestUrl, ncEx.Message });
+                }
+
+                retryTimes++;
+                if (retryTimes < 3)
+                {
+                    System.Threading.Thread.Sleep(1000 * 3);
+                    goto InvokeStart;
+                }
+            }
+            finally
+            {
+                lastAccessToken = row["AccessToken"];
             }
         }
 

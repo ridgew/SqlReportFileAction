@@ -13,6 +13,7 @@ namespace SqlReportFileAction
         static void Main(string[] args)
         {
             //System.Diagnostics.Debugger.Launch();
+
             if (args != null && args.Length > 0)
             {
                 if (args.Length == 3 && args[1].StartsWith("--"))
@@ -118,7 +119,7 @@ namespace SqlReportFileAction
                                     {
                                         try
                                         {
-                                            t.Execute(r);
+                                            t.Execute(r, null);
                                         }
                                         catch (Exception ex)
                                         {
@@ -159,7 +160,7 @@ namespace SqlReportFileAction
                 {
                     try
                     {
-                        t.Execute(row);
+                        t.Execute(row, log);
                     }
                     catch (Exception rowEx)
                     {
